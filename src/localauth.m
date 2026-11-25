@@ -69,6 +69,8 @@
  * I officially recind my curse above.  Thank you, Apple!
  */
 
+#include <stdlib.h>
+
 #import <LocalAuthentication/LocalAuthentication.h>
 
 #include "keychain_pkcs11.h"
@@ -91,6 +93,26 @@ void *
 lacontext_new(void)
 {
 	LAContext *lac = [[LAContext alloc] init];
+	const char *prompt = getenv("KEYCHAIN_PKCS11_PROMPT");
+
+	/*
+	 * Disable Touch ID authentication reuse so every signing operation
+	 * requires a fresh user verification.
+	 */
+	lac.touchIDAuthenticationAllowableReuseDuration = 0;
+
+	/*
+	 * Use a heap-allocated NSString for localizedReason so LAClient
+	 * never holds a pointer to a constant string in our __DATA section
+	 * across dlclose().
+	 */
+	if (prompt && prompt[0] != '\0') {
+		NSString *reason = [[NSString alloc] initWithUTF8String:prompt];
+		if (reason) {
+			lac.localizedReason = reason;
+			[reason release];
+		}
+	}
 
 	/*
 	 * Since we are not using ARC, I believe this is correct; we
@@ -164,8 +186,14 @@ lacontext_auth(void *l, unsigned char *bytes, size_t len, void *sec,
 	 * becomes invalid after dlclose() and causes a crash in LAClient's
 	 * async cleanup when it calls isEqual: on the stored string.
 	 */
-	NSString *reason = [[NSString alloc]
-			    initWithUTF8String:"authenticate to your smartcard"];
+	const char *prompt = getenv("KEYCHAIN_PKCS11_PROMPT");
+	NSString *reason = NULL;
+
+	if (prompt && prompt[0] != '\0')
+		reason = [[NSString alloc] initWithUTF8String:prompt];
+	if (!reason)
+		reason = [[NSString alloc]
+			  initWithUTF8String:"authenticate to your smartcard"];
 
 	[lac evaluateAccessControl: secaccess
 			operation: acc_control
