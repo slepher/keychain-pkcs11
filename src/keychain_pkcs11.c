@@ -399,14 +399,15 @@ static void sess_free(struct session *);
 #define CHECKSESSION(session, var) \
 do { \
 	LOCK_MUTEX(sess_mutex); \
-	session--; \
-	if (session >= sess_list_count || sess_list[session] == NULL) { \
+	if (session-- == 0 || session >= sess_list_count || sess_list[session] == NULL) { \
 		os_log_debug(logsys, "Session handle %lu is invalid, " \
-			     "returning CKR_SESSION_HANDLE_INVALID", session); \
+			     "returning CKR_SESSION_HANDLE_INVALID", \
+			     session + 1); \
 		UNLOCK_MUTEX(sess_mutex); \
 		return CKR_SESSION_HANDLE_INVALID; \
 	} \
 	var = sess_list[session]; \
+	LOCK_MUTEX(var->mutex); \
 	UNLOCK_MUTEX(sess_mutex); \
 } while (0)
 
@@ -1262,7 +1263,7 @@ CK_RV C_CloseSession(CK_SESSION_HANDLE session)
 
 	LOCK_MUTEX(sess_mutex);
 
-	sess_free(se);
+	sess_free(se);	/* note - unlocks mutex */
 
 	sess_list[session] = NULL;
 
@@ -1299,6 +1300,7 @@ CK_RV C_CloseAllSessions(CK_SLOT_ID slot_id)
 	for (i = 0; i < sess_list_count; i++) {
 		if (sess_list[i] && sess_list[i]->slot_id == slot_id) {
 			os_log_debug(logsys, "Closing session %d", i);
+			LOCK_MUTEX(sess_list[i]->mutex);
 			sess_free(sess_list[i]);
 			sess_list[i] = NULL;
 		}
@@ -1321,8 +1323,10 @@ CK_RV C_GetSessionInfo(CK_SESSION_HANDLE session,
 
 	CHECKSESSION(session, se);
 
-	if (!session_info)
+	if (!session_info) {
+		UNLOCK_MUTEX(se->mutex);
 		RET(C_GetSessionInfo, CKR_ARGUMENTS_BAD);
+	}
 
 	session_info->slotID = se->slot_id;
 	session_info->state = (se->token && se->token->logged_in) ?
@@ -1330,6 +1334,8 @@ CK_RV C_GetSessionInfo(CK_SESSION_HANDLE session,
 						CKS_RO_PUBLIC_SESSION;
 	session_info->flags = CKF_SERIAL_SESSION ;
 	session_info->ulDeviceError = 0;
+
+	UNLOCK_MUTEX(se->mutex);
 
 	RET(C_GetSessionInfo, CKR_OK);
 }
@@ -1354,8 +1360,6 @@ CK_RV C_Login(CK_SESSION_HANDLE session, CK_USER_TYPE usertype,
 		     usertype);
 
 	CHECKSESSION(session, se);
-
-	LOCK_MUTEX(se->mutex);
 
 	/*
 	 * If we don't have a token associated with this slot, then
@@ -1435,8 +1439,6 @@ CK_RV C_Logout(CK_SESSION_HANDLE session)
 
 	CHECKSESSION(session, se);
 
-	LOCK_MUTEX(se->mutex);
-
 	if (! se->token)
 		goto out;
 
@@ -1473,8 +1475,6 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE session, CK_OBJECT_HANDLE object,
 		     (int) count);
 
 	CHECKSESSION(session, se);
-
-	LOCK_MUTEX(se->mutex);
 
 	object--;
 
@@ -1547,8 +1547,6 @@ CK_RV C_FindObjectsInit(CK_SESSION_HANDLE session, CK_ATTRIBUTE_PTR template,
 
 	CHECKSESSION(session, se);
 
-	LOCK_MUTEX(se->mutex);
-
 	se->obj_search_index = 0;
 
 	/*
@@ -1595,10 +1593,10 @@ CK_RV C_FindObjects(CK_SESSION_HANDLE session, CK_OBJECT_HANDLE_PTR object,
 
 	CHECKSESSION(session, se);
 
-	if (! object || maxcount == 0)
+	if (! object || maxcount == 0) {
+		UNLOCK_MUTEX(se->mutex);
 		RET(C_FindObjects, CKR_ARGUMENTS_BAD);
-
-	LOCK_MUTEX(se->mutex);
+	}
 
 	for (; se->obj_search_index < se->obj_list_count;
 						se->obj_search_index++) {
@@ -1634,8 +1632,6 @@ CK_RV C_FindObjectsFinal(CK_SESSION_HANDLE session)
 
 	CHECKSESSION(session, se);
 
-	LOCK_MUTEX(se->mutex);
-
 	os_log_debug(logsys, "session = %d", (int) session);
 
 	for (i = 0; i < se->search_attrs_count; i++)
@@ -1665,10 +1661,9 @@ CK_RV C_EncryptInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 
 	CHECKSESSION(session, se);
 
-	LOCK_MUTEX(se->mutex);
-
 	if (! mech) {
 		os_log_debug(logsys, "mechanism pointer is NULL");
+		UNLOCK_MUTEX(se->mutex);
 		RET(C_EncryptInit, CKR_MECHANISM_INVALID);
 	}
 
@@ -1781,8 +1776,6 @@ CK_RV C_Encrypt(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 
 	CHECKSESSION(session, se);
 
-	LOCK_MUTEX(se->mutex);
-
 	os_log_debug(logsys, "session = %d, indata = %p, inlen = %d, "
 		     "outdata = %p, outlen = %d", (int) session, indata,
 		     (int) indatalen, outdata, (int) *outdatalen);
@@ -1887,10 +1880,9 @@ CK_RV C_DecryptInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 
 	CHECKSESSION(session, se);
 
-	LOCK_MUTEX(se->mutex);
-
 	if (! mech) {
 		os_log_debug(logsys, "mechanism pointer is NULL");
+		UNLOCK_MUTEX(se->mutex);
 		RET(C_DecryptInit, CKR_MECHANISM_INVALID);
 	}
 
@@ -1988,8 +1980,6 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 	FUNCINITCHK(C_Decrypt);
 
 	CHECKSESSION(session, se);
-
-	LOCK_MUTEX(se->mutex);
 
 	os_log_debug(logsys, "session = %d, indata = %p, inlen = %d, "
 		     "outdata = %p, outlen = %d", (int) session, indata,
@@ -2258,8 +2248,6 @@ CK_RV C_SignInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 
 	CHECKSESSION(session, se);
 
-	LOCK_MUTEX(se->mutex);
-
 	/*
 	 * Make sure no operations are in progress
 	 */
@@ -2458,8 +2446,6 @@ CK_RV C_Sign(CK_SESSION_HANDLE session, CK_BYTE_PTR indata, CK_ULONG indatalen,
 
 	CHECKSESSION(session, se);
 
-	LOCK_MUTEX(se->mutex);
-
 #ifdef KEYCHAIN_DEBUG
 	if ((file = getenv("KEYCHAIN_PKCS11_SIGN_DATAFILE"))) {
 		FILE *f = fopen(file, "w");
@@ -2602,8 +2588,6 @@ CK_RV C_SignUpdate(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 
 	CHECKSESSION(session, se);
 
-	LOCK_MUTEX(se->mutex);
-
 	/*
 	 * Make sure we are either in S_INIT or S_UPDATE
 	 */
@@ -2687,8 +2671,6 @@ CK_RV C_SignFinal(CK_SESSION_HANDLE session, CK_BYTE_PTR sig,
 		     (int) session, sig, (int) *siglen);
 
 	CHECKSESSION(session, se);
-
-	LOCK_MUTEX(se->mutex);
 
 	/*
 	 * Make sure we are in S_UPDATE (C_SignUpdate() has been called
@@ -2836,8 +2818,6 @@ CK_RV C_VerifyInit(CK_SESSION_HANDLE session, CK_MECHANISM_PTR mech,
 
 	CHECKSESSION(session, se);
 
-	LOCK_MUTEX(se->mutex);
-
 	/*
 	 * Make sure no operations are in progress
 	 */
@@ -2935,8 +2915,6 @@ CK_RV C_Verify(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 
 	CHECKSESSION(session, se);
 
-	LOCK_MUTEX(se->mutex);
-
 	if (se->state != V_INIT) {
 		os_log_debug(logsys, "No Verify operation initialized");
 		rv = CKR_OPERATION_NOT_INITIALIZED;
@@ -3002,8 +2980,6 @@ CK_RV C_VerifyUpdate(CK_SESSION_HANDLE session, CK_BYTE_PTR indata,
 
 	CHECKSESSION(session, se);
 
-	LOCK_MUTEX(se->mutex);
-
 	/*
 	 * Make sure we are in V_INIT or V_UPDATE
 	 */
@@ -3066,8 +3042,6 @@ CK_RV C_VerifyFinal(CK_SESSION_HANDLE session, CK_BYTE_PTR sig,
 		     (int) session, sig, (int) siglen);
 
 	CHECKSESSION(session, se);
-
-	LOCK_MUTEX(se->mutex);
 
 	if (se->state != V_UPDATE) {
 		os_log_debug(logsys, "Not in V_UPDATE state");
@@ -3545,11 +3519,11 @@ add_identity(struct slot_entry *entry, CFDictionaryRef dict)
 		}
 	}
 
-	if (!ret) {
+	if (! ret) {
 		id->pubkey = SecCertificateCopyKey(id->cert);
-		if (!id->pubkey) {
-			os_log_debug(logsys, "SecCertificateCopyKey failed");
-			ret = -1;
+		if (! id->pubkey) {
+			os_log_debug(logsys, "Unable to retrieve public key");
+			ret = errSecItemNotFound;
 		}
 	}
 
@@ -5737,15 +5711,13 @@ array_free(char **array)
 }
 
 /*
- * Free a session
+ * Free a session.  Must be called with the session mutex locked.
  */
 
 static void
 sess_free(struct session *se)
 {
 	int i;
-
-	LOCK_MUTEX(se->mutex);
 
 	for (i = 0; i < se->search_attrs_count; i++)
 		free(se->search_attrs[i].pValue);

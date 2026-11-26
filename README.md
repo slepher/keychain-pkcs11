@@ -45,7 +45,7 @@ The basic steps for getting using Keychain-PKCS11 are:
    installer package, found on the
    [GitHub release page](https://github.com/kenh/keychain-pkcs11/releases).
    That page includes signed installer packages that should work with
-   any version of MacOS X from High Sierra onwards.
+   any version of MacOS X from Mojave onwards.
 2. Configure your applications to use Keychain-PKCS11.  The library
    is installed in `/usr/local/lib/keychain-pkcs11.dylib`.  How each
    application is configured unfortunately varies by application.
@@ -139,3 +139,37 @@ people still associate "Keychain" with Apple.  In theory this perhaps
 should be called "CryptoTokenKit-PKCS11", but it doesn't really call
 any CryptoTokenKit functions directly with the exception of the `TKToken`
 watcher interface.  So I've decided to stick with the current name for now.
+
+## Changes in the slepher fork
+
+This fork is based on upstream Keychain-PKCS11 1.1.1. It retains ECDSA
+support and adds the following behavior for Secure Enclave SSH signing:
+
+- Set `KEYCHAIN_PKCS11_PROMPT` to customize the Touch ID authorization
+  message. With OpenSSH's PKCS#11 agent integration, set it before starting
+  `ssh-agent` so its PKCS#11 helper inherits it.
+- The module sets the Touch ID authentication reuse duration to zero and
+  uses a fresh authentication context when it can reopen the key by its
+  persistent reference.
+- With `askPIN` disabled, the module advertises a protected authentication
+  path without setting `CKF_LOGIN_REQUIRED`. This lets OpenSSH load the
+  token without a PIN and leaves authentication for key use to macOS.
+
+### Download or build
+
+Download `keychain-pkcs11.dylib` from the **Assets** for the desired
+version. The universal module targets macOS 10.14 or later on Intel
+(`x86_64`) and macOS 11.0 or later on Apple Silicon (`arm64`).
+[GitHub Releases](https://github.com/slepher/keychain-pkcs11/releases)
+
+To build locally, clone this fork or download its source ZIP from GitHub.
+From the source directory, with the tools listed in
+[README-devel.md](README-devel.md) installed, run:
+
+```sh
+./autogen.sh && ./configure && make &&
+  codesign --force --sign - .libs/keychain-pkcs11.dylib
+```
+
+Configure your PKCS#11 client with the absolute path to the downloaded or
+locally built module.

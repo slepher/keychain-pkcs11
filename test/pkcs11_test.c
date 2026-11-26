@@ -48,6 +48,13 @@ static void dump_object_info(CK_FUNCTION_LIST_PTR, CK_SESSION_HANDLE,
 			     CK_OBJECT_HANDLE, CK_OBJECT_CLASS);
 
 /*
+ * Dump public key info
+ */
+
+static void dump_pubkey_info(CK_FUNCTION_LIST_PTR, CK_SESSION_HANDLE,
+			     CK_OBJECT_HANDLE);
+
+/*
  * Write out one or more attributes of an object
  */
 
@@ -249,6 +256,7 @@ usage(const char *progname)
     fprintf(stderr, "\t\t\t%%o\tObject number\n");
     fprintf(stderr, "\t\t\t%%a\tAttribute number\n");
     fprintf(stderr, "\t\t\t%%s\tSlot number\n");
+    fprintf(stderr, "\t-l\t\tForce login to card\n");
     fprintf(stderr, "\t-L\t\tDo NOT log into card using C_Login\n");
     fprintf(stderr, "\t-N num\t\tSign <num> bytes of NULs (may be "
     		    "repeated)\n");
@@ -262,6 +270,7 @@ usage(const char *progname)
 #endif
     fprintf(stderr, "\t-S signdata\tData to sign; requires -o, "
 		    "may be repeated\n");
+    fprintf(stderr, "\t-t\t\tRequest thread locking\n");
     fprintf(stderr, "\t-T\t\tAllow the use of slots WITHOUT tokens\n");
     fprintf(stderr, "\t-v filename\tFilename of data to verify signature;\n");
     fprintf(stderr, "\t\t\tuse -V for signature data and -o to select key\n");
@@ -303,6 +312,8 @@ int main(int argc, char *argv[]) {
     CK_OBJECT_HANDLE sObject = -1;
     CK_MECHANISM_TYPE sMech = CKM_RSA_PKCS;
     CK_MECHANISM mech = { sMech, NULL, 0 };
+    CK_VOID_PTR initArgsPtr = NULL;
+    CK_C_INITIALIZE_ARGS initArgs;
     const char *verify_data = NULL;
     const char *verify_sig = NULL;
     const char *attr_filename = NULL;
@@ -318,12 +329,13 @@ int main(int argc, char *argv[]) {
     bool forcenologin = false;
     bool requiretoken = true;
     bool waitslot = false;
+    bool threadlocking = false;
 
     struct attr_list *attr_head = NULL, *attr_tail = NULL, *attr;
 
     int i;
 
-    while ((i = getopt(argc, argv, "a:c:D:E:f:F:lLN:n:o:S:s:Tv:V:wW")) != -1) {
+    while ((i = getopt(argc, argv, "a:c:D:E:f:F:lLN:n:o:S:s:tTv:V:wW")) != -1) {
 	switch (i) {
 	case 'a':
 	    if (!attr_filename && !attr_filetemplate) {
@@ -459,6 +471,9 @@ int main(int argc, char *argv[]) {
 	    }
 
 	    break;
+	case 't':
+	    threadlocking = true;
+	    break;
 	case 'T':
 	    requiretoken = false;
 	    break;
@@ -502,7 +517,13 @@ int main(int argc, char *argv[]) {
         return(1);
     }
 
-    rv = p11p->C_Initialize(NULL);
+    if (threadlocking) {
+	memset(&initArgs, 0, sizeof(initArgs));
+	initArgs.flags = CKF_OS_LOCKING_OK;
+	initArgsPtr = &initArgs;
+    }
+
+    rv = p11p->C_Initialize(initArgsPtr);
     if (rv != CKR_OK) {
         fprintf(stderr, "Error initalizing library (rv = %X)\n", (unsigned int) rv);
         return(2);
@@ -562,10 +583,10 @@ int main(int argc, char *argv[]) {
 		"is valid\n");
     }
 
-    if (slotList) free(slotList);
-
     if (slot == -1)
 	slot = slotList[0];
+
+    if (slotList) free(slotList);
 
     memset(&sInfo, 0, sizeof(sInfo));
     if (p11p->C_GetSlotInfo) {
@@ -1017,6 +1038,7 @@ int main(int argc, char *argv[]) {
 			   &issuer_attr, (void *) NULL);
                 break;
 	    case CKO_PUBLIC_KEY:
+		dump_pubkey_info(p11p, hSession, phObject[i]);
 	    case CKO_PRIVATE_KEY:
 		dump_attrs(p11p, hSession, phObject[i], NULL, &id_attr,
 			   &keytype_attr, &genmech_attr, &allowedmech_attr,
@@ -1476,8 +1498,8 @@ CK_RV getPassword(CK_UTF8CHAR *pass, CK_ULONG *length) {
 
     (void)fgets((char *)pass, (int)*length, stdin);
     cp = strchr((char *)pass, '\n');
-    if (cp) *cp = (char)NULL;
-    else pass[*length - 1] = (char)NULL;
+    if (cp) *cp = '\0';
+    else pass[*length - 1] = '\0';
 
     *length = (CK_ULONG)strlen((char *)pass);
 
@@ -1703,8 +1725,9 @@ dump_object_info(CK_FUNCTION_LIST_PTR p11p, CK_SESSION_HANDLE session,
 	    dump_attrs(p11p, session, obj, classhint, &app_attr,
 		       &objid_attr, &value_attr, (void *) NULL);
 	    break;
-	case CKO_PUBLIC_KEY:
 	case CKO_PRIVATE_KEY:
+		dump_pubkey_info(p11p, session, obj);
+	case CKO_PUBLIC_KEY:
 	    dump_attrs(p11p, session, obj, classhint, &id_attr,
 		       &keytype_attr, &genmech_attr, &allowedmech_attr,
 		       &subject_attr, (void *) NULL);
@@ -1773,6 +1796,60 @@ dump_attrs(CK_FUNCTION_LIST_PTR p11p, CK_SESSION_HANDLE session,
     va_end(ap);
 
     return rvret;
+}
+
+/*
+ * Retrieve a public key and return some information about it
+ */
+
+static void
+dump_pubkey_info(CK_FUNCTION_LIST_PTR p11p, CK_SESSION_HANDLE session,
+		 CK_OBJECT_HANDLE obj)
+{
+    CK_ATTRIBUTE template[2];
+    int i, tcount = sizeof(template) / sizeof(template[0]);
+    CK_RV rv;
+
+    template[0].type = CKA_MODULUS;
+    template[1].type = CKA_PUBLIC_EXPONENT;
+
+    for (i = 0; i < tcount; i++) {
+	template[i].pValue = NULL;
+	template[i].ulValueLen = 0;
+    }
+
+    rv = p11p->C_GetAttributeValue(session, obj, template, tcount);
+
+    if (rv != CKR_OK) {
+	printf("Call to C_GetAttribteValue failed: %s (%d)\n",
+	       getCKRName(rv), (int) rv);
+	return;
+    }
+
+    for (i = 0; i < tcount; i++) {
+	template[i].pValue = malloc(template[i].ulValueLen);
+    }
+
+    rv = p11p->C_GetAttributeValue(session, obj, template, tcount);
+
+    if (rv != CKR_OK) {
+	printf("Second call to C_GetAttribteValue failed: %s (%d)\n",
+	       getCKRName(rv), (int) rv);
+	goto out;
+    }
+
+    for (i = 0; i < tcount; i++) {
+	printf("%s: %d bytes\n", getCKAName(template[i].type),
+	       (int) template[i].ulValueLen);
+	hexify_dump(template[i].pValue, template[i].ulValueLen);
+	putchar('\n');
+    }
+
+out:
+    for (i = 0; i < tcount; i++) {
+	if (template[i].pValue)
+	    free(template[i].pValue);
+    }
 }
 
 /*
